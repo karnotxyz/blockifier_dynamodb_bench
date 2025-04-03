@@ -60,11 +60,6 @@ impl StateReader for DynamoDbStateReader {
         contract_address: ContractAddress,
         key: StorageKey,
     ) -> StateResult<Felt> {
-        println!(
-            "Reading storage at contract {} with key {}",
-            contract_address,
-            key.0.key(),
-        );
         let client = self.client.clone();
         let contract_address = contract_address.clone();
         let key = key.clone();
@@ -78,7 +73,6 @@ impl StateReader for DynamoDbStateReader {
                         StateError::StateReadError(format!("Failed to read storage: {}", e))
                     })?
                     .unwrap_or_default();
-                println!("Retrieved storage value: {}", value);
                 Ok(value)
             })
         })
@@ -87,7 +81,6 @@ impl StateReader for DynamoDbStateReader {
     }
 
     fn get_nonce_at(&self, contract_address: ContractAddress) -> StateResult<Nonce> {
-        println!("Reading nonce at contract {}", contract_address);
         let client = self.client.clone();
         let contract_address = contract_address.clone();
 
@@ -100,7 +93,6 @@ impl StateReader for DynamoDbStateReader {
                         StateError::StateReadError(format!("Failed to read nonce: {}", e))
                     })?
                     .unwrap_or_default();
-                println!("Retrieved nonce: {}", nonce);
                 Ok(nonce)
             })
         })
@@ -109,7 +101,6 @@ impl StateReader for DynamoDbStateReader {
     }
 
     fn get_class_hash_at(&self, contract_address: ContractAddress) -> StateResult<ClassHash> {
-        println!("Reading class hash at contract {}", contract_address);
         let client = self.client.clone();
         let contract_address = contract_address.clone();
 
@@ -122,7 +113,6 @@ impl StateReader for DynamoDbStateReader {
                         StateError::StateReadError(format!("Failed to read class hash: {}", e))
                     })?
                     .unwrap_or_default();
-                println!("Retrieved class hash: {}", class_hash);
                 Ok(class_hash)
             })
         })
@@ -131,7 +121,6 @@ impl StateReader for DynamoDbStateReader {
     }
 
     fn get_compiled_class_hash(&self, class_hash: ClassHash) -> StateResult<CompiledClassHash> {
-        println!("Reading compiled class hash for class hash {}", class_hash);
         let client = self.client.clone();
         let class_hash = class_hash.clone();
 
@@ -148,7 +137,6 @@ impl StateReader for DynamoDbStateReader {
                             ))
                         })?
                         .unwrap_or_default();
-                println!("Retrieved compiled class hash: {}", compiled_hash);
                 Ok(compiled_hash)
             })
         })
@@ -157,16 +145,7 @@ impl StateReader for DynamoDbStateReader {
     }
 
     fn get_compiled_class(&self, class_hash: ClassHash) -> StateResult<RunnableCompiledClass> {
-        println!("Reading compiled class for class hash {}", class_hash);
         let result = self.get_compiled_class(class_hash);
-        println!(
-            "Retrieved compiled class: {}",
-            if result.is_ok() {
-                "Success"
-            } else {
-                "Not found"
-            }
-        );
         result
     }
 }
@@ -181,13 +160,6 @@ pub async fn update_state_diff(
     // Handle storage updates
     for (contract_address, storage_updates) in state_diff.storage_updates {
         for (key, value) in storage_updates {
-            println!(
-                "Updating storage for contract {} with key DDB {} and key {:?} and value {}",
-                contract_address,
-                key.to_ddb_string(),
-                key,
-                value.to_ddb_string()
-            );
             write_requests.push(
                 aws_sdk_dynamodb::types::TransactWriteItem::builder()
                     .put(

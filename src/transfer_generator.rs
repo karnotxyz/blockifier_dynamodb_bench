@@ -11,6 +11,7 @@ use blockifier::test_utils::contracts::{FeatureContractData, FeatureContractTrai
 use blockifier_test_utils::cairo_versions::CairoVersion;
 use blockifier_test_utils::contracts::FeatureContract;
 use indexmap::IndexMap;
+use log::info;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use starknet_api::abi::abi_utils::{get_fee_token_var_address, selector_from_name};
@@ -115,14 +116,9 @@ pub struct TransfersGenerator {
 
 impl TransfersGenerator {
     pub async fn new(config: TransfersGeneratorConfig) -> Self {
-        println!(
-            "Creating new TransfersGenerator with {} accounts",
-            config.n_accounts
-        );
         let account_contract = FeatureContract::AccountWithoutValidations(config.cairo_version);
         let block_context = BlockContext::create_for_account_testing();
         let chain_info = block_context.chain_info().clone();
-        println!("Initializing test state...");
         let state = test_state(
             &chain_info,
             config.balance,
@@ -130,35 +126,26 @@ impl TransfersGenerator {
             config.dynamo_db_client.clone(),
         )
         .await;
-        println!("Test state initialized");
         let executor_config = TransactionExecutorConfig {
             concurrency_config: config.concurrency_config.clone(),
             stack_size: config.stack_size,
         };
         let executor = TransactionExecutor::new(state, block_context, executor_config);
-        println!("Created transaction executor");
         let account_addresses = (0..config.n_accounts)
             .map(|instance_id| account_contract.get_instance_address(instance_id))
             .collect::<Vec<_>>();
-        println!("Generated {} account addresses", account_addresses.len());
         let nonce_manager = NonceManager::default();
         let mut recipient_addresses = None;
         let mut random_recipient_generator = None;
         match config.recipient_generator_type {
             RecipientGeneratorType::Random => {
                 // Use a random generator to get the next recipient.
-                println!(
-                    "Initializing random recipient generator with seed {}",
-                    config.randomization_seed
-                );
                 random_recipient_generator = Some(StdRng::seed_from_u64(config.randomization_seed));
             }
             RecipientGeneratorType::RoundRobin => {
-                println!("Using round robin recipient selection");
                 // Use the next account after the sender in the list as the recipient.
             }
             RecipientGeneratorType::DisjointFromSenders => {
-                println!("Creating disjoint set of recipient addresses");
                 // Use a disjoint set of accounts as recipients. The index of the recipient is the
                 // same as the index of the sender.
                 recipient_addresses = Some(
@@ -166,13 +153,8 @@ impl TransfersGenerator {
                         .map(|instance_id| account_contract.get_instance_address(instance_id))
                         .collect::<Vec<_>>(),
                 );
-                println!(
-                    "Generated {} recipient addresses",
-                    recipient_addresses.as_ref().unwrap().len()
-                );
             }
         };
-        println!("TransfersGenerator initialization complete");
         Self {
             account_addresses,
             chain_info,
@@ -205,26 +187,28 @@ impl TransfersGenerator {
     }
 
     pub async fn execute_transfers(&mut self) {
-        for _ in 0..self.config.n_txs {
+        for i in 0..self.config.n_txs {
+            let start_time = std::time::Instant::now();
+
             let sender_address = self.account_addresses[self.sender_index];
-            println!("sender_address: {:?}", sender_address);
             let recipient_address = self.get_next_recipient();
             self.sender_index = (self.sender_index + 1) % self.account_addresses.len();
 
             let tx = self.generate_transfer(sender_address, recipient_address);
             let account_tx = AccountTransaction::new_for_sequencing(tx);
-            println!("account_tx: {:?}", account_tx);
             let results = self
                 .executor
                 .execute_txs(&[Transaction::Account(account_tx)]);
             for result in results {
-                println!("result: {:?}", result);
                 assert!(!result.unwrap().0.is_reverted());
             }
             let state_diff = self.executor.finalize().unwrap().state_diff;
             update_state_diff(self.dynamo_db_client.clone(), state_diff)
                 .await
                 .unwrap();
+
+            let elapsed = start_time.elapsed();
+            info!("Transfer {} took {:?}", i + 1, elapsed);
         }
     }
 
@@ -386,10 +370,6 @@ pub async fn fund_account(
     state_diff: &mut CommitmentStateDiff,
 ) {
     let balance_key = get_fee_token_var_address(account_address);
-    println!(
-        "balance_key: {:?} for account: {:?}",
-        balance_key, account_address
-    );
     for fee_type in FeeType::iter() {
         let fee_token_address = chain_info.fee_token_address(&fee_type);
         state_diff

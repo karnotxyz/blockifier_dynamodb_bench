@@ -53,6 +53,7 @@ async fn migrate(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    env_logger::init();
 
     let config = aws_config::defaults(BehaviorVersion::latest())
         .region(Region::new("us-east-1"))
