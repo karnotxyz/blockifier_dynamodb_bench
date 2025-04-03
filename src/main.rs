@@ -89,7 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 record.args()
             )
         })
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(
+            std::env::var("RUST_LOG")
+                .map(|level| level.parse().unwrap_or(log::LevelFilter::Info))
+                .unwrap_or(log::LevelFilter::Info),
+        )
         .init();
     info!("Starting benchmark...");
 
@@ -127,6 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             };
             let mut transfers_generator = TransfersGenerator::new(transfers_generator_config).await;
+            info!("Starting transfers...");
             transfers_generator.execute_transfers().await;
 
             // Log metrics

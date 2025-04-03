@@ -40,6 +40,7 @@ use tokio::runtime::Runtime;
 
 use crate::dynamodb_state_reader::{update_state_diff, DynamoDbStateReader};
 use crate::metrics::StateMetrics;
+use crate::models::ReadTracker;
 const N_ACCOUNTS: u16 = 10000;
 const N_TXS: usize = 10;
 const RANDOMIZATION_SEED: u64 = 0;
@@ -61,6 +62,7 @@ pub struct TransfersGeneratorConfig {
     pub stack_size: usize,
     pub dynamo_db_client: Arc<DynamoDbClient>,
     pub metrics: Arc<StateMetrics>,
+    pub read_tracker: Arc<ReadTracker>,
 }
 
 impl Default for TransfersGeneratorConfig {
@@ -94,6 +96,7 @@ impl Default for TransfersGeneratorConfig {
             stack_size: DEFAULT_STACK_SIZE,
             dynamo_db_client: client,
             metrics: Arc::new(StateMetrics::new()),
+            read_tracker: Arc::new(ReadTracker::new()),
         }
     }
 }
@@ -116,6 +119,7 @@ pub struct TransfersGenerator {
     config: TransfersGeneratorConfig,
     dynamo_db_client: Arc<DynamoDbClient>,
     pub metrics: Arc<StateMetrics>,
+    pub read_tracker: Arc<ReadTracker>,
 }
 
 impl TransfersGenerator {
@@ -129,6 +133,7 @@ impl TransfersGenerator {
             &[(account_contract, config.n_accounts)],
             config.dynamo_db_client.clone(),
             config.metrics.clone(),
+            config.read_tracker.clone(),
         )
         .await;
         let executor_config = TransactionExecutorConfig {
@@ -144,15 +149,10 @@ impl TransfersGenerator {
         let mut random_recipient_generator = None;
         match config.recipient_generator_type {
             RecipientGeneratorType::Random => {
-                // Use a random generator to get the next recipient.
                 random_recipient_generator = Some(StdRng::seed_from_u64(config.randomization_seed));
             }
-            RecipientGeneratorType::RoundRobin => {
-                // Use the next account after the sender in the list as the recipient.
-            }
+            RecipientGeneratorType::RoundRobin => {}
             RecipientGeneratorType::DisjointFromSenders => {
-                // Use a disjoint set of accounts as recipients. The index of the recipient is the
-                // same as the index of the sender.
                 recipient_addresses = Some(
                     (config.n_accounts..2 * config.n_accounts)
                         .map(|instance_id| account_contract.get_instance_address(instance_id))
@@ -171,6 +171,7 @@ impl TransfersGenerator {
             config: config.clone(),
             dynamo_db_client: config.dynamo_db_client.clone(),
             metrics: config.metrics.clone(),
+            read_tracker: config.read_tracker.clone(),
         }
     }
 
@@ -213,6 +214,7 @@ impl TransfersGenerator {
                 self.dynamo_db_client.clone(),
                 state_diff,
                 self.metrics.clone(),
+                self.read_tracker.clone(),
             )
             .await
             .unwrap();
@@ -276,6 +278,7 @@ pub async fn test_state(
     contract_instances: &[(FeatureContract, u16)],
     dynamo_db_client: Arc<DynamoDbClient>,
     metrics: Arc<StateMetrics>,
+    read_tracker: Arc<ReadTracker>,
 ) -> CachedState<DynamoDbStateReader> {
     let contract_instances_vec: Vec<(FeatureContractData, u16)> = contract_instances
         .iter()
@@ -287,6 +290,7 @@ pub async fn test_state(
         &contract_instances_vec[..],
         dynamo_db_client,
         metrics,
+        read_tracker,
     )
     .await
 }
@@ -297,6 +301,7 @@ pub async fn test_state_ex(
     contract_instances: &[(FeatureContractData, u16)],
     dynamo_db_client: Arc<DynamoDbClient>,
     metrics: Arc<StateMetrics>,
+    read_tracker: Arc<ReadTracker>,
 ) -> CachedState<DynamoDbStateReader> {
     test_state_inner(
         chain_info,
@@ -305,6 +310,7 @@ pub async fn test_state_ex(
         CairoVersion::Cairo0,
         dynamo_db_client,
         metrics,
+        read_tracker,
     )
     .await
 }
@@ -324,6 +330,7 @@ pub async fn test_state_inner(
     erc20_contract_version: CairoVersion,
     dynamo_db_client: Arc<DynamoDbClient>,
     metrics: Arc<StateMetrics>,
+    read_tracker: Arc<ReadTracker>,
 ) -> CachedState<DynamoDbStateReader> {
     let mut class_hash_to_class = HashMap::new();
     let mut address_to_class_hash = HashMap::new();
@@ -356,6 +363,7 @@ pub async fn test_state_inner(
         dynamo_db_client.clone(),
         class_hash_to_class,
         metrics.clone(),
+        read_tracker.clone(),
     );
 
     // fund the accounts.
@@ -374,9 +382,15 @@ pub async fn test_state_inner(
         }
     }
 
-    update_state_diff(dynamo_db_client.clone(), state_diff, metrics)
-        .await
-        .unwrap();
+    info!("Updating test state diff...");
+    update_state_diff(
+        dynamo_db_client.clone(),
+        state_diff,
+        metrics,
+        read_tracker.clone(),
+    )
+    .await
+    .unwrap();
 
     CachedState::from(state_reader)
 }
