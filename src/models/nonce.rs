@@ -5,7 +5,10 @@ use starknet_types_core::felt::Felt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use super::{table::{DynamoTable, TableSchema}, ToDDBString};
+use super::{
+    table::{DynamoTable, TableSchema},
+    ToDDBString,
+};
 
 pub struct NonceTable;
 

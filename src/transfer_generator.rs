@@ -327,10 +327,13 @@ pub async fn test_state(
     CachedState<DynamoDbStateReader>,
     HashMap<ClassHash, RunnableCompiledClass>,
 ) {
-    let contract_instances_vec: Vec<(FeatureContractData, Vec<ContractAddress>)> = contract_instances
-        .iter()
-        .map(|(feature_contract, instance_addresses)| ((*feature_contract).into(), instance_addresses.clone()))
-        .collect();
+    let contract_instances_vec: Vec<(FeatureContractData, Vec<ContractAddress>)> =
+        contract_instances
+            .iter()
+            .map(|(feature_contract, instance_addresses)| {
+                ((*feature_contract).into(), instance_addresses.clone())
+            })
+            .collect();
     test_state_ex(
         chain_info,
         initial_balances,

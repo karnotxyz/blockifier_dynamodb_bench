@@ -85,17 +85,24 @@ async fn migrate(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    // env_logger::builder()
+    //     .format(|buf, record| {
+    //         use std::io::Write;
+    //         writeln!(
+    //             buf,
+    //             "[{} {}] {}",
+    //             buf.timestamp_millis(),
+    //             record.level(),
+    //             record.args()
+    //         )
+    //     })
+    //     .filter_level(
+    //         std::env::var("RUST_LOG")
+    //             .map(|level| level.parse().unwrap_or(log::LevelFilter::Info))
+    //             .unwrap_or(log::LevelFilter::Info),
+    //     )
+    //     .init();
     env_logger::builder()
-        .format(|buf, record| {
-            use std::io::Write;
-            writeln!(
-                buf,
-                "[{} {}] {}",
-                buf.timestamp_millis(),
-                record.level(),
-                record.args()
-            )
-        })
         .filter_level(
             std::env::var("RUST_LOG")
                 .map(|level| level.parse().unwrap_or(log::LevelFilter::Info))

@@ -5,7 +5,10 @@ use starknet_types_core::felt::Felt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use super::{table::{DynamoTable, TableSchema}, ToDDBString};
+use super::{
+    table::{DynamoTable, TableSchema},
+    ToDDBString,
+};
 
 pub struct StorageTable;
 
@@ -32,7 +35,10 @@ impl StorageTable {
                 "contract_address",
                 AttributeValue::S(contract_address.to_ddb_string()),
             )
-            .key("storage_key", AttributeValue::S(key.0.key().to_ddb_string()))
+            .key(
+                "storage_key",
+                AttributeValue::S(key.0.key().to_ddb_string()),
+            )
             .send()
             .await?;
 
