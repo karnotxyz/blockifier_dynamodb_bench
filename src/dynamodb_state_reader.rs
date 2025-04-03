@@ -1,3 +1,5 @@
+use aws_sdk_dynamodb::error::SdkError;
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use log::{debug, info};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -22,8 +24,7 @@ use tokio::runtime::Runtime;
 
 use crate::metrics::StateMetrics;
 use crate::models::{
-    ClassHashTable, CompiledClassTable, DynamoTable, NonceTable,
-    StorageTable, ToDDBString,
+    ClassHashTable, CompiledClassTable, DynamoTable, NonceTable, StorageTable, ToDDBString,
 };
 use crate::read_tracker::{ReadTracker, ReadValue};
 /// A DynamoDB-based implementation of `StateReader`.
@@ -295,6 +296,7 @@ pub async fn update_state_diff(
     state_diff: CommitmentStateDiff,
     metrics: Arc<StateMetrics>,
     read_tracker: Arc<ReadTracker>,
+    allow_chunking: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
     debug!("Starting state diff update...");
@@ -305,6 +307,11 @@ pub async fn update_state_diff(
     // Handle storage updates
     debug!("Processing storage updates...");
     for (contract_address, storage_updates) in state_diff.storage_updates {
+        if contract_address == ContractAddress::from(2_u8) {
+            // 0x2 is a special address that stores compressed state diffs
+            // Skipping this for now as it hurts parallelisation and can be optimised later
+            continue;
+        }
         for (key, value) in storage_updates {
             let key_values = vec![contract_address.to_ddb_string(), key.to_ddb_string()];
             debug!(
@@ -313,12 +320,14 @@ pub async fn update_state_diff(
             );
 
             // First check if there's a read value
-            let maybe_read = if read_tracker.has_storage_read(&contract_address, &key) {
+            let maybe_read = if read_tracker.has_storage_read(&contract_address, &key).await {
                 debug!(
                     "Found existing storage read for contract {} and key {:?}",
                     contract_address, key
                 );
-                read_tracker.remove_storage_read(&contract_address, &key)
+                read_tracker
+                    .remove_storage_read(&contract_address, &key)
+                    .await
             } else {
                 None
             };
@@ -344,12 +353,12 @@ pub async fn update_state_diff(
         );
 
         // First check if there's a read value
-        let maybe_read = if read_tracker.has_nonce_read(&contract_address) {
+        let maybe_read = if read_tracker.has_nonce_read(&contract_address).await {
             debug!(
                 "Found existing nonce read for contract {}",
                 contract_address
             );
-            read_tracker.remove_nonce_read(&contract_address)
+            read_tracker.remove_nonce_read(&contract_address).await
         } else {
             None
         };
@@ -374,12 +383,12 @@ pub async fn update_state_diff(
         );
 
         // First check if there's a read value
-        let maybe_read = if read_tracker.has_class_hash_read(&contract_address) {
+        let maybe_read = if read_tracker.has_class_hash_read(&contract_address).await {
             debug!(
                 "Found existing class hash read for contract {}",
                 contract_address
             );
-            read_tracker.remove_class_hash_read(&contract_address)
+            read_tracker.remove_class_hash_read(&contract_address).await
         } else {
             None
         };
@@ -404,12 +413,14 @@ pub async fn update_state_diff(
         );
 
         // First check if there's a read value
-        let maybe_read = if read_tracker.has_compiled_class_hash_read(&class_hash) {
+        let maybe_read = if read_tracker.has_compiled_class_hash_read(&class_hash).await {
             debug!(
                 "Found existing compiled class hash read for class hash {}",
                 class_hash
             );
-            read_tracker.remove_compiled_class_hash_read(&class_hash)
+            read_tracker
+                .remove_compiled_class_hash_read(&class_hash)
+                .await
         } else {
             None
         };
@@ -428,7 +439,7 @@ pub async fn update_state_diff(
     debug!("Processing remaining reads...");
 
     // Storage reads
-    let mut storage_reads = read_tracker.storage_reads.lock().unwrap();
+    let mut storage_reads = read_tracker.storage_reads.lock().await;
     debug!("Processing {} remaining storage reads", storage_reads.len());
     for (contract_address, storage_map) in storage_reads.drain() {
         for (key, read_value) in storage_map {
@@ -449,7 +460,7 @@ pub async fn update_state_diff(
     drop(storage_reads);
 
     // Nonce reads
-    let mut nonce_reads = read_tracker.nonce_reads.lock().unwrap();
+    let mut nonce_reads = read_tracker.nonce_reads.lock().await;
     debug!("Processing {} remaining nonce reads", nonce_reads.len());
     for (contract_address, read_value) in nonce_reads.drain() {
         debug!(
@@ -468,7 +479,7 @@ pub async fn update_state_diff(
     drop(nonce_reads);
 
     // Class hash reads
-    let mut class_hash_reads = read_tracker.class_hash_reads.lock().unwrap();
+    let mut class_hash_reads = read_tracker.class_hash_reads.lock().await;
     debug!(
         "Processing {} remaining class hash reads",
         class_hash_reads.len()
@@ -490,7 +501,7 @@ pub async fn update_state_diff(
     drop(class_hash_reads);
 
     // Compiled class hash reads
-    let mut compiled_class_hash_reads = read_tracker.compiled_class_hash_reads.lock().unwrap();
+    let mut compiled_class_hash_reads = read_tracker.compiled_class_hash_reads.lock().await;
     debug!(
         "Processing {} remaining compiled class hash reads",
         compiled_class_hash_reads.len()
@@ -513,31 +524,33 @@ pub async fn update_state_diff(
 
     // Check if we have more than 100 items
     debug!("Total number of requests: {}", all_requests.len());
-    if all_requests.len() > 100 {
+    if all_requests.len() > 100 && !allow_chunking {
         return Err(anyhow::anyhow!(
-            "Too many items to update in one transaction: {}. DynamoDB limit is 25",
+            "Too many items to update in one transaction: {}. DynamoDB limit is 100",
             all_requests.len()
         ));
     }
 
     // Execute the transaction if we have any updates
     if !all_requests.is_empty() {
-        debug!(
+        info!(
             "Executing DynamoDB transaction with {} requests",
             all_requests.len()
         );
-        client
-            .transact_write_items()
-            .set_transact_items(Some(all_requests))
-            .send()
-            .await?;
+        for chunk in all_requests.chunks(100) {
+            client
+                .transact_write_items()
+                .set_transact_items(Some(chunk.to_vec()))
+                .send()
+                .await?;
+        }
         debug!("DynamoDB transaction completed successfully");
     } else {
         debug!("No requests to process, skipping DynamoDB transaction");
     }
 
     // Assert that all reads have been processed
-    if !read_tracker.is_empty() {
+    if !read_tracker.is_empty().await {
         panic!(
             "Read tracker not empty after processing all reads: {:?}",
             read_tracker

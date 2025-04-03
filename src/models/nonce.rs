@@ -1,4 +1,5 @@
 use aws_sdk_dynamodb::{types::AttributeValue, Client as DynamoDbClient};
+use log::info;
 use starknet_api::core::{ContractAddress, Nonce};
 use starknet_types_core::felt::Felt;
 use std::str::FromStr;
@@ -23,6 +24,7 @@ impl NonceTable {
         client: Arc<DynamoDbClient>,
         contract_address: &ContractAddress,
     ) -> anyhow::Result<Option<Nonce>> {
+        info!("Getting nonce for contract address: {}", contract_address);
         let result = client
             .get_item()
             .table_name(Self::schema().name)
@@ -32,7 +34,7 @@ impl NonceTable {
             )
             .send()
             .await?;
-
+        info!("Got nonce for contract address: {}", contract_address);
         if let Some(item) = result.item {
             if let Some(value) = item.get("nonce") {
                 if let Ok(nonce_str) = value.as_s() {

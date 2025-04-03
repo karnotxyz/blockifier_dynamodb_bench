@@ -2,9 +2,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
+use std::{thread, u16};
 
 use aws_config::{BehaviorVersion, Region};
+use blockifier::execution::contract_class::RunnableCompiledClass;
 use blockifier::state;
 use blockifier::state::cached_state::{CachedState, CommitmentStateDiff, StateMaps};
 use blockifier::test_utils::contracts::{FeatureContractData, FeatureContractTrait};
@@ -16,7 +17,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use starknet_api::abi::abi_utils::{get_fee_token_var_address, selector_from_name};
 use starknet_api::block::FeeType;
-use starknet_api::core::ContractAddress;
+use starknet_api::core::{ClassHash, ContractAddress};
 use starknet_api::executable_transaction::AccountTransaction as ApiExecutableTransaction;
 use starknet_api::test_utils::invoke::executable_invoke_tx;
 use starknet_api::test_utils::NonceManager;
@@ -63,6 +64,7 @@ pub struct TransfersGeneratorConfig {
     pub dynamo_db_client: Arc<DynamoDbClient>,
     pub metrics: Arc<StateMetrics>,
     pub read_tracker: Arc<ReadTracker>,
+    pub account_seed: u16,
 }
 
 impl Default for TransfersGeneratorConfig {
@@ -97,6 +99,7 @@ impl Default for TransfersGeneratorConfig {
             dynamo_db_client: client,
             metrics: Arc::new(StateMetrics::new()),
             read_tracker: Arc::new(ReadTracker::new()),
+            account_seed: 0,
         }
     }
 }
@@ -120,6 +123,8 @@ pub struct TransfersGenerator {
     dynamo_db_client: Arc<DynamoDbClient>,
     pub metrics: Arc<StateMetrics>,
     pub read_tracker: Arc<ReadTracker>,
+    account_seed: u16,
+    class_hash_to_class: HashMap<ClassHash, RunnableCompiledClass>,
 }
 
 impl TransfersGenerator {
@@ -127,10 +132,21 @@ impl TransfersGenerator {
         let account_contract = FeatureContract::AccountWithoutValidations(config.cairo_version);
         let block_context = BlockContext::create_for_account_testing();
         let chain_info = block_context.chain_info().clone();
-        let state = test_state(
+
+        let start_instance_id = config.account_seed * config.n_accounts;
+        info!(
+            "Seeds used for sender address generation: {} -> {}",
+            start_instance_id,
+            start_instance_id + config.n_accounts
+        );
+        let account_addresses = (start_instance_id..start_instance_id + config.n_accounts)
+            .map(|instance_id| account_contract.get_instance_address(instance_id as u16))
+            .collect::<Vec<_>>();
+
+        let (state, class_hash_to_class) = test_state(
             &chain_info,
             config.balance,
-            &[(account_contract, config.n_accounts)],
+            &[(account_contract, account_addresses.clone())],
             config.dynamo_db_client.clone(),
             config.metrics.clone(),
             config.read_tracker.clone(),
@@ -141,9 +157,7 @@ impl TransfersGenerator {
             stack_size: config.stack_size,
         };
         let executor = TransactionExecutor::new(state, block_context, executor_config);
-        let account_addresses = (0..config.n_accounts)
-            .map(|instance_id| account_contract.get_instance_address(instance_id))
-            .collect::<Vec<_>>();
+
         let nonce_manager = NonceManager::default();
         let mut recipient_addresses = None;
         let mut random_recipient_generator = None;
@@ -153,8 +167,14 @@ impl TransfersGenerator {
             }
             RecipientGeneratorType::RoundRobin => {}
             RecipientGeneratorType::DisjointFromSenders => {
+                let end_instance_id = u16::MAX - config.n_accounts * config.account_seed;
+                info!(
+                    "Seeds used for recipient address generation: {} -> {}",
+                    end_instance_id - config.n_accounts,
+                    end_instance_id
+                );
                 recipient_addresses = Some(
-                    (config.n_accounts..2 * config.n_accounts)
+                    (end_instance_id - config.n_accounts..end_instance_id)
                         .map(|instance_id| account_contract.get_instance_address(instance_id))
                         .collect::<Vec<_>>(),
                 );
@@ -172,6 +192,8 @@ impl TransfersGenerator {
             dynamo_db_client: config.dynamo_db_client.clone(),
             metrics: config.metrics.clone(),
             read_tracker: config.read_tracker.clone(),
+            account_seed: config.account_seed,
+            class_hash_to_class,
         }
     }
 
@@ -193,35 +215,57 @@ impl TransfersGenerator {
         }
     }
 
-    pub async fn execute_transfers(&mut self) {
-        for i in 0..self.config.n_txs {
-            let start_time = std::time::Instant::now();
+    pub fn reload_executor(&mut self) {
+        let state = CachedState::new(DynamoDbStateReader::new(
+            self.dynamo_db_client.clone(),
+            self.class_hash_to_class.clone(),
+            self.metrics.clone(),
+            self.read_tracker.clone(),
+        ));
+        let block_context = BlockContext::create_for_account_testing();
+        let executor_config = TransactionExecutorConfig {
+            concurrency_config: self.config.concurrency_config.clone(),
+            stack_size: self.config.stack_size,
+        };
+        self.executor = TransactionExecutor::new(state, block_context, executor_config);
+    }
 
+    pub async fn execute_transfers(&mut self) {
+        let mut txs: Vec<Transaction> = Vec::with_capacity(self.config.n_txs);
+        let start_time = std::time::Instant::now();
+        for _ in 0..self.config.n_txs {
             let sender_address = self.account_addresses[self.sender_index];
             let recipient_address = self.get_next_recipient();
             self.sender_index = (self.sender_index + 1) % self.account_addresses.len();
 
             let tx = self.generate_transfer(sender_address, recipient_address);
             let account_tx = AccountTransaction::new_for_sequencing(tx);
-            let results = self
-                .executor
-                .execute_txs(&[Transaction::Account(account_tx)]);
+            txs.push(Transaction::Account(account_tx));
+        }
+
+        // Process transactions in chunks of 20
+        for chunk in txs.chunks(1) {
+            let results = self.executor.execute_txs(chunk);
             for result in results {
                 assert!(!result.unwrap().0.is_reverted());
             }
             let state_diff = self.executor.finalize().unwrap().state_diff;
             update_state_diff(
                 self.dynamo_db_client.clone(),
-                state_diff,
+                state_diff.clone(),
                 self.metrics.clone(),
                 self.read_tracker.clone(),
+                false,
             )
             .await
-            .unwrap();
+            .expect(format!("Failed to update state diff for diff {:?}", state_diff).as_str());
 
-            let elapsed = start_time.elapsed();
-            info!("Transfer {} took {:?}", i + 1, elapsed);
+            // This is done to reset to state diffs
+            self.reload_executor();
         }
+
+        let elapsed = start_time.elapsed();
+        info!("{} transfers took {:?}", self.config.n_txs, elapsed);
     }
 
     pub fn generate_transfer(
@@ -275,14 +319,17 @@ impl TransfersGenerator {
 pub async fn test_state(
     chain_info: &ChainInfo,
     initial_balances: Fee,
-    contract_instances: &[(FeatureContract, u16)],
+    contract_instances: &[(FeatureContract, Vec<ContractAddress>)],
     dynamo_db_client: Arc<DynamoDbClient>,
     metrics: Arc<StateMetrics>,
     read_tracker: Arc<ReadTracker>,
-) -> CachedState<DynamoDbStateReader> {
-    let contract_instances_vec: Vec<(FeatureContractData, u16)> = contract_instances
+) -> (
+    CachedState<DynamoDbStateReader>,
+    HashMap<ClassHash, RunnableCompiledClass>,
+) {
+    let contract_instances_vec: Vec<(FeatureContractData, Vec<ContractAddress>)> = contract_instances
         .iter()
-        .map(|(feature_contract, i)| ((*feature_contract).into(), *i))
+        .map(|(feature_contract, instance_addresses)| ((*feature_contract).into(), instance_addresses.clone()))
         .collect();
     test_state_ex(
         chain_info,
@@ -298,11 +345,14 @@ pub async fn test_state(
 pub async fn test_state_ex(
     chain_info: &ChainInfo,
     initial_balances: Fee,
-    contract_instances: &[(FeatureContractData, u16)],
+    contract_instances: &[(FeatureContractData, Vec<ContractAddress>)],
     dynamo_db_client: Arc<DynamoDbClient>,
     metrics: Arc<StateMetrics>,
     read_tracker: Arc<ReadTracker>,
-) -> CachedState<DynamoDbStateReader> {
+) -> (
+    CachedState<DynamoDbStateReader>,
+    HashMap<ClassHash, RunnableCompiledClass>,
+) {
     test_state_inner(
         chain_info,
         initial_balances,
@@ -326,12 +376,15 @@ pub async fn test_state_ex(
 pub async fn test_state_inner(
     chain_info: &ChainInfo,
     initial_balances: Fee,
-    contract_instances: &[(FeatureContractData, u16)],
+    contract_instances: &[(FeatureContractData, Vec<ContractAddress>)],
     erc20_contract_version: CairoVersion,
     dynamo_db_client: Arc<DynamoDbClient>,
     metrics: Arc<StateMetrics>,
     read_tracker: Arc<ReadTracker>,
-) -> CachedState<DynamoDbStateReader> {
+) -> (
+    CachedState<DynamoDbStateReader>,
+    HashMap<ClassHash, RunnableCompiledClass>,
+) {
     let mut class_hash_to_class = HashMap::new();
     let mut address_to_class_hash = HashMap::new();
 
@@ -348,12 +401,11 @@ pub async fn test_state_inner(
     );
 
     // Set up the rest of the requested contracts.
-    for (contract, n_instances) in contract_instances.iter() {
+    for (contract, instance_addresses) in contract_instances.iter() {
         let class_hash = contract.class_hash;
         class_hash_to_class.insert(class_hash, contract.runnable_class.clone());
-        for instance in 0..*n_instances {
-            let instance_address = contract.get_instance_address(instance);
-            address_to_class_hash.insert(instance_address, class_hash);
+        for instance_address in instance_addresses.iter() {
+            address_to_class_hash.insert(*instance_address, class_hash);
         }
     }
 
@@ -361,19 +413,18 @@ pub async fn test_state_inner(
     state_diff.address_to_class_hash = IndexMap::from_iter(address_to_class_hash);
     let state_reader = DynamoDbStateReader::new(
         dynamo_db_client.clone(),
-        class_hash_to_class,
+        class_hash_to_class.clone(),
         metrics.clone(),
         read_tracker.clone(),
     );
 
     // fund the accounts.
-    for (contract, n_instances) in contract_instances.iter() {
-        for instance in 0..*n_instances {
-            let instance_address = contract.get_instance_address(instance);
+    for (contract, instance_addresses) in contract_instances.iter() {
+        for instance_address in instance_addresses.iter() {
             if contract.require_funding {
                 fund_account(
                     chain_info,
-                    instance_address,
+                    *instance_address,
                     initial_balances,
                     &mut state_diff,
                 )
@@ -388,11 +439,12 @@ pub async fn test_state_inner(
         state_diff,
         metrics,
         read_tracker.clone(),
+        true,
     )
     .await
     .unwrap();
 
-    CachedState::from(state_reader)
+    (CachedState::from(state_reader), class_hash_to_class)
 }
 
 /// Utility to fund an account.

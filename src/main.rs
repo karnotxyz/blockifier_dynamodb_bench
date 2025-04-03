@@ -2,6 +2,7 @@ use aws_config::{BehaviorVersion, Region};
 use aws_sdk_dynamodb::Client as DynamoDbClient;
 use clap::{Parser, Subcommand};
 use log::info;
+use metrics::StateMetrics;
 use std::sync::Arc;
 use std::time::Duration;
 use transfer_generator::{RecipientGeneratorType, TransfersGenerator, TransfersGeneratorConfig};
@@ -9,11 +10,12 @@ use transfer_generator::{RecipientGeneratorType, TransfersGenerator, TransfersGe
 mod dynamodb_state_reader;
 mod metrics;
 mod models;
-mod transfer_generator;
 mod read_tracker;
+mod transfer_generator;
 
 use models::{
-    ClassHashTable, ClassTable, CompiledClassTable, DynamoTable, NonceTable, StorageTable,
+    ClassHashTable, ClassTable, CompiledClassTable, CounterTable, DynamoTable, NonceTable,
+    StorageTable,
 };
 
 fn format_duration(duration: Duration) -> String {
@@ -53,8 +55,10 @@ enum Commands {
     Cleanup,
     /// Run the benchmark
     Bench {
-        #[arg(short, long, default_value_t = 1)]
+        #[arg(long, default_value_t = 1)]
         n_accounts: u16,
+        #[arg(long, default_value_t = 10)]
+        n_txs: u16,
     },
 }
 
@@ -64,6 +68,7 @@ async fn cleanup(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
     ClassHashTable::delete(client.clone()).await?;
     ClassTable::delete(client.clone()).await?;
     CompiledClassTable::delete(client.clone()).await?;
+    CounterTable::delete(client.clone()).await?;
     Ok(())
 }
 
@@ -73,6 +78,7 @@ async fn migrate(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
     ClassHashTable::deploy(client.clone()).await?;
     ClassTable::deploy(client.clone()).await?;
     CompiledClassTable::deploy(client.clone()).await?;
+    CounterTable::deploy(client.clone()).await?;
     Ok(())
 }
 
@@ -111,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Cleanup => {
             cleanup(client).await?;
         }
-        Commands::Bench { n_accounts } => {
+        Commands::Bench { n_accounts, n_txs } => {
             info!("Running benchmark with {} accounts...", n_accounts);
             // First cleanup and then migrate to ensure a fresh state
             cleanup(client.clone()).await?;
@@ -125,19 +131,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             info!("Done waiting!");
 
-            let transfers_generator_config = TransfersGeneratorConfig {
-                recipient_generator_type: RecipientGeneratorType::DisjointFromSenders,
-                n_accounts,
-                dynamo_db_client: client.clone(),
-                ..Default::default()
-            };
-            let mut transfers_generator = TransfersGenerator::new(transfers_generator_config).await;
-            info!("Starting transfers...");
-            transfers_generator.execute_transfers().await;
+            // Get a unique counter value for this bench run
+            // This ensures multiple instances of the bench can run in parallel
+            // Each instance will use this unique counter to ensure no collisions
+            // across accounts generated
+            let counter = CounterTable::get_and_increment(client.clone()).await?;
+            info!("Starting bench run #{}", counter);
+
+            let metrics = Arc::new(StateMetrics::default());
+            let number_of_generators = 1;
+            let seed_range = number_of_generators * n_accounts; // every generator has n_accounts inside it
+            let seed_start = counter * seed_range;
+            let mut init_handles = vec![];
+            let mut generators = vec![];
+
+            // First create all generators
+            for i in 0..number_of_generators {
+                let transfers_generator_config = TransfersGeneratorConfig {
+                    recipient_generator_type: RecipientGeneratorType::DisjointFromSenders,
+                    n_accounts,
+                    n_txs: n_txs as usize,
+                    dynamo_db_client: client.clone(),
+                    account_seed: i, // Use different seed for each generator
+                    metrics: metrics.clone(),
+                    ..Default::default()
+                };
+
+                let handle = tokio::spawn(async move {
+                    TransfersGenerator::new(transfers_generator_config).await
+                });
+                init_handles.push(handle);
+            }
+
+            info!("Waiting for all generators to initialize...");
+            for handle in init_handles {
+                generators.push(handle.await.unwrap());
+            }
+
+            let mut transfer_handles = vec![];
+            // Now execute transfers
+            for (i, mut generator) in generators.into_iter().enumerate() {
+                let handle = tokio::spawn(async move {
+                    info!("Starting transfers for generator {}...", i);
+                    generator.execute_transfers().await;
+                });
+                transfer_handles.push(handle);
+            }
+
+            info!("Waiting for all transfers to complete...");
+            for handle in transfer_handles {
+                handle.await.unwrap();
+            }
 
             // Log metrics
             info!("\n=== Performance Metrics ===");
-            let metrics = transfers_generator.metrics.clone();
             {
                 let storage_reads = metrics.storage_reads.lock().unwrap();
                 log_metrics("Storage reads", &storage_reads);
