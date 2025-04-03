@@ -40,7 +40,7 @@ use tokio::runtime::Runtime;
 
 use crate::dynamodb_state_reader::{update_state_diff, DynamoDbStateReader};
 use crate::metrics::StateMetrics;
-use crate::models::ReadTracker;
+use crate::read_tracker::ReadTracker;
 const N_ACCOUNTS: u16 = 10000;
 const N_TXS: usize = 10;
 const RANDOMIZATION_SEED: u64 = 0;

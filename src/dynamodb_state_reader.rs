@@ -22,10 +22,10 @@ use tokio::runtime::Runtime;
 
 use crate::metrics::StateMetrics;
 use crate::models::{
-    ClassHashTable, CompiledClassTable, DynamoTable, NonceTable, ReadTracker, ReadValue,
+    ClassHashTable, CompiledClassTable, DynamoTable, NonceTable,
     StorageTable, ToDDBString,
 };
-
+use crate::read_tracker::{ReadTracker, ReadValue};
 /// A DynamoDB-based implementation of `StateReader`.
 #[derive(Debug, Clone)]
 pub struct DynamoDbStateReader {

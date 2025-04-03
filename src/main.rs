@@ -10,6 +10,7 @@ mod dynamodb_state_reader;
 mod metrics;
 mod models;
 mod transfer_generator;
+mod read_tracker;
 
 use models::{
     ClassHashTable, ClassTable, CompiledClassTable, DynamoTable, NonceTable, StorageTable,
