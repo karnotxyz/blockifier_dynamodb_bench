@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::{client, Client as DynamoDbClient};
@@ -19,27 +20,29 @@ use blockifier::state::errors::StateError;
 use blockifier::state::state_api::{StateReader, StateResult};
 use tokio::runtime::Runtime;
 
+use crate::metrics::StateMetrics;
 use crate::models::{
     ClassHashTable, CompiledClassTable, DynamoTable, NonceTable, StorageTable, ToDDBString,
 };
-
-const TABLE_NAME_COMPILED_CLASSES: &str = "starknet_compiled_classes";
 
 /// A DynamoDB-based implementation of `StateReader`.
 #[derive(Debug, Clone)]
 pub struct DynamoDbStateReader {
     client: Arc<DynamoDbClient>,
     class_hash_to_class: HashMap<ClassHash, RunnableCompiledClass>,
+    pub metrics: Arc<StateMetrics>,
 }
 
 impl DynamoDbStateReader {
     pub fn new(
         client: Arc<DynamoDbClient>,
         class_hash_to_class: HashMap<ClassHash, RunnableCompiledClass>,
+        metrics: Arc<StateMetrics>,
     ) -> Self {
         Self {
             client,
             class_hash_to_class,
+            metrics,
         }
     }
 
@@ -63,17 +66,24 @@ impl StateReader for DynamoDbStateReader {
         let client = self.client.clone();
         let contract_address = contract_address.clone();
         let key = key.clone();
+        let metrics = self.metrics.clone();
 
         thread::spawn(move || {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
-                let value = StorageTable::get_storage_value(client, &contract_address, &key)
+                let start = Instant::now();
+                let result = StorageTable::get_storage_value(client, &contract_address, &key)
                     .await
                     .map_err(|e| {
                         StateError::StateReadError(format!("Failed to read storage: {}", e))
                     })?
                     .unwrap_or_default();
-                Ok(value)
+                metrics
+                    .storage_reads
+                    .lock()
+                    .unwrap()
+                    .add_duration(start.elapsed());
+                Ok(result)
             })
         })
         .join()
@@ -83,17 +93,24 @@ impl StateReader for DynamoDbStateReader {
     fn get_nonce_at(&self, contract_address: ContractAddress) -> StateResult<Nonce> {
         let client = self.client.clone();
         let contract_address = contract_address.clone();
+        let metrics = self.metrics.clone();
 
         thread::spawn(move || {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
-                let nonce = NonceTable::get_nonce_value(client, &contract_address)
+                let start = Instant::now();
+                let result = NonceTable::get_nonce_value(client, &contract_address)
                     .await
                     .map_err(|e| {
                         StateError::StateReadError(format!("Failed to read nonce: {}", e))
                     })?
                     .unwrap_or_default();
-                Ok(nonce)
+                metrics
+                    .nonce_reads
+                    .lock()
+                    .unwrap()
+                    .add_duration(start.elapsed());
+                Ok(result)
             })
         })
         .join()
@@ -103,17 +120,24 @@ impl StateReader for DynamoDbStateReader {
     fn get_class_hash_at(&self, contract_address: ContractAddress) -> StateResult<ClassHash> {
         let client = self.client.clone();
         let contract_address = contract_address.clone();
+        let metrics = self.metrics.clone();
 
         thread::spawn(move || {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
-                let class_hash = ClassHashTable::get_class_hash_value(client, &contract_address)
+                let start = Instant::now();
+                let result = ClassHashTable::get_class_hash_value(client, &contract_address)
                     .await
                     .map_err(|e| {
                         StateError::StateReadError(format!("Failed to read class hash: {}", e))
                     })?
                     .unwrap_or_default();
-                Ok(class_hash)
+                metrics
+                    .class_hash_reads
+                    .lock()
+                    .unwrap()
+                    .add_duration(start.elapsed());
+                Ok(result)
             })
         })
         .join()
@@ -123,21 +147,27 @@ impl StateReader for DynamoDbStateReader {
     fn get_compiled_class_hash(&self, class_hash: ClassHash) -> StateResult<CompiledClassHash> {
         let client = self.client.clone();
         let class_hash = class_hash.clone();
+        let metrics = self.metrics.clone();
 
         thread::spawn(move || {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
-                let compiled_hash =
-                    CompiledClassTable::get_compiled_class_hash_value(client, &class_hash)
-                        .await
-                        .map_err(|e| {
-                            StateError::StateReadError(format!(
-                                "Failed to read compiled class hash: {}",
-                                e
-                            ))
-                        })?
-                        .unwrap_or_default();
-                Ok(compiled_hash)
+                let start = Instant::now();
+                let result = CompiledClassTable::get_compiled_class_hash_value(client, &class_hash)
+                    .await
+                    .map_err(|e| {
+                        StateError::StateReadError(format!(
+                            "Failed to read compiled class hash: {}",
+                            e
+                        ))
+                    })?
+                    .unwrap_or_default();
+                metrics
+                    .compiled_class_hash_reads
+                    .lock()
+                    .unwrap()
+                    .add_duration(start.elapsed());
+                Ok(result)
             })
         })
         .join()
@@ -153,7 +183,10 @@ impl StateReader for DynamoDbStateReader {
 pub async fn update_state_diff(
     client: Arc<DynamoDbClient>,
     state_diff: CommitmentStateDiff,
+    metrics: Arc<StateMetrics>,
 ) -> anyhow::Result<()> {
+    let start = Instant::now();
+
     // Collect all write requests for the transaction
     let mut write_requests = Vec::new();
 
@@ -249,5 +282,10 @@ pub async fn update_state_diff(
             .await?;
     }
 
+    metrics
+        .state_updates
+        .lock()
+        .unwrap()
+        .add_duration(start.elapsed());
     Ok(())
 }

@@ -3,7 +3,11 @@ use aws_sdk_dynamodb::{
     types::{AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType},
     Client as DynamoDbClient,
 };
-use starknet_api::{core::{ClassHash, CompiledClassHash, ContractAddress, Nonce}, state::StorageKey};
+use log::info;
+use starknet_api::{
+    core::{ClassHash, CompiledClassHash, ContractAddress, Nonce},
+    state::StorageKey,
+};
 use starknet_types_core::felt::Felt;
 use std::sync::Arc;
 
@@ -53,7 +57,7 @@ pub trait DynamoTable {
             .send()
             .await?;
 
-        println!("Created table: {}", schema.name);
+        info!("Created table: {}", schema.name);
         Ok(())
     }
 
@@ -65,7 +69,7 @@ pub trait DynamoTable {
             Err(e) => match e {
                 SdkError::ServiceError(err) => {
                     if err.err().is_resource_not_found_exception() {
-                        println!("Table {} does not exist", name);
+                        info!("Table {} does not exist", name);
                         return Ok(());
                     }
                     return Err(Box::new(err.into_err()));
@@ -74,11 +78,10 @@ pub trait DynamoTable {
             },
         }
 
-        println!("Deleted table: {}", name);
+        info!("Deleted table: {}", name);
         Ok(())
     }
 }
-
 
 pub trait ToDDBString {
     fn to_ddb_string(&self) -> String;
@@ -108,7 +111,6 @@ impl ToDDBString for ContractAddress {
     }
 }
 
-
 impl ToDDBString for Nonce {
     fn to_ddb_string(&self) -> String {
         format!("0x{:x}", self.0)
@@ -120,4 +122,3 @@ impl ToDDBString for CompiledClassHash {
         format!("0x{:x}", self.0)
     }
 }
-

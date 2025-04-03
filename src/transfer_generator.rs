@@ -39,6 +39,7 @@ use strum::IntoEnumIterator;
 use tokio::runtime::Runtime;
 
 use crate::dynamodb_state_reader::{update_state_diff, DynamoDbStateReader};
+use crate::metrics::StateMetrics;
 const N_ACCOUNTS: u16 = 10000;
 const N_TXS: usize = 10;
 const RANDOMIZATION_SEED: u64 = 0;
@@ -59,6 +60,7 @@ pub struct TransfersGeneratorConfig {
     pub concurrency_config: ConcurrencyConfig,
     pub stack_size: usize,
     pub dynamo_db_client: Arc<DynamoDbClient>,
+    pub metrics: Arc<StateMetrics>,
 }
 
 impl Default for TransfersGeneratorConfig {
@@ -70,7 +72,7 @@ impl Default for TransfersGeneratorConfig {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
                 let config = aws_config::defaults(BehaviorVersion::latest())
-                    .region(Region::new("us-east-1"))
+                    .region(Region::new("ap-south-1"))
                     .load()
                     .await;
                 Arc::new(DynamoDbClient::new(&config))
@@ -91,6 +93,7 @@ impl Default for TransfersGeneratorConfig {
             concurrency_config: ConcurrencyConfig::create_for_testing(concurrency_enabled),
             stack_size: DEFAULT_STACK_SIZE,
             dynamo_db_client: client,
+            metrics: Arc::new(StateMetrics::new()),
         }
     }
 }
@@ -112,6 +115,7 @@ pub struct TransfersGenerator {
     recipient_addresses: Option<Vec<ContractAddress>>,
     config: TransfersGeneratorConfig,
     dynamo_db_client: Arc<DynamoDbClient>,
+    pub metrics: Arc<StateMetrics>,
 }
 
 impl TransfersGenerator {
@@ -124,6 +128,7 @@ impl TransfersGenerator {
             config.balance,
             &[(account_contract, config.n_accounts)],
             config.dynamo_db_client.clone(),
+            config.metrics.clone(),
         )
         .await;
         let executor_config = TransactionExecutorConfig {
@@ -165,6 +170,7 @@ impl TransfersGenerator {
             recipient_addresses,
             config: config.clone(),
             dynamo_db_client: config.dynamo_db_client.clone(),
+            metrics: config.metrics.clone(),
         }
     }
 
@@ -203,9 +209,13 @@ impl TransfersGenerator {
                 assert!(!result.unwrap().0.is_reverted());
             }
             let state_diff = self.executor.finalize().unwrap().state_diff;
-            update_state_diff(self.dynamo_db_client.clone(), state_diff)
-                .await
-                .unwrap();
+            update_state_diff(
+                self.dynamo_db_client.clone(),
+                state_diff,
+                self.metrics.clone(),
+            )
+            .await
+            .unwrap();
 
             let elapsed = start_time.elapsed();
             info!("Transfer {} took {:?}", i + 1, elapsed);
@@ -265,6 +275,7 @@ pub async fn test_state(
     initial_balances: Fee,
     contract_instances: &[(FeatureContract, u16)],
     dynamo_db_client: Arc<DynamoDbClient>,
+    metrics: Arc<StateMetrics>,
 ) -> CachedState<DynamoDbStateReader> {
     let contract_instances_vec: Vec<(FeatureContractData, u16)> = contract_instances
         .iter()
@@ -275,6 +286,7 @@ pub async fn test_state(
         initial_balances,
         &contract_instances_vec[..],
         dynamo_db_client,
+        metrics,
     )
     .await
 }
@@ -284,6 +296,7 @@ pub async fn test_state_ex(
     initial_balances: Fee,
     contract_instances: &[(FeatureContractData, u16)],
     dynamo_db_client: Arc<DynamoDbClient>,
+    metrics: Arc<StateMetrics>,
 ) -> CachedState<DynamoDbStateReader> {
     test_state_inner(
         chain_info,
@@ -291,6 +304,7 @@ pub async fn test_state_ex(
         contract_instances,
         CairoVersion::Cairo0,
         dynamo_db_client,
+        metrics,
     )
     .await
 }
@@ -309,6 +323,7 @@ pub async fn test_state_inner(
     contract_instances: &[(FeatureContractData, u16)],
     erc20_contract_version: CairoVersion,
     dynamo_db_client: Arc<DynamoDbClient>,
+    metrics: Arc<StateMetrics>,
 ) -> CachedState<DynamoDbStateReader> {
     let mut class_hash_to_class = HashMap::new();
     let mut address_to_class_hash = HashMap::new();
@@ -337,7 +352,11 @@ pub async fn test_state_inner(
 
     let mut state_diff = CommitmentStateDiff::default();
     state_diff.address_to_class_hash = IndexMap::from_iter(address_to_class_hash);
-    let state_reader = DynamoDbStateReader::new(dynamo_db_client.clone(), class_hash_to_class);
+    let state_reader = DynamoDbStateReader::new(
+        dynamo_db_client.clone(),
+        class_hash_to_class,
+        metrics.clone(),
+    );
 
     // fund the accounts.
     for (contract, n_instances) in contract_instances.iter() {
@@ -355,7 +374,7 @@ pub async fn test_state_inner(
         }
     }
 
-    update_state_diff(dynamo_db_client.clone(), state_diff)
+    update_state_diff(dynamo_db_client.clone(), state_diff, metrics)
         .await
         .unwrap();
 
