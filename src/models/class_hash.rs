@@ -14,7 +14,7 @@ pub struct ClassHashTable;
 impl DynamoTable for ClassHashTable {
     fn schema() -> TableSchema {
         TableSchema {
-            name: "starknet_class_hashes".to_string(),
+            name: "blockifier_ddb_starknet_class_hashes".to_string(),
             hash_key: "contract_address".to_string(),
             sort_key: None,
         }

@@ -15,7 +15,7 @@ pub const ALL_TXS_PARTITION_KEY: &str = "ALL_TXS";
 impl DynamoTable for TxLogTable {
     fn schema() -> TableSchema {
         TableSchema {
-            name: "starknet_tx_logs".to_string(),
+            name: "blockifier_ddb_starknet_tx_logs".to_string(),
             hash_key: "partition_key".to_string(),
             sort_key: Some("timestamp".to_string()),
         }

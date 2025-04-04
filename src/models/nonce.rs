@@ -15,7 +15,7 @@ pub struct NonceTable;
 impl DynamoTable for NonceTable {
     fn schema() -> TableSchema {
         TableSchema {
-            name: "starknet_nonces".to_string(),
+            name: "blockifier_ddb_starknet_nonces".to_string(),
             hash_key: "contract_address".to_string(),
             sort_key: None,
         }

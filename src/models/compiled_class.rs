@@ -14,7 +14,7 @@ pub struct CompiledClassTable;
 impl DynamoTable for CompiledClassTable {
     fn schema() -> TableSchema {
         TableSchema {
-            name: "starknet_compiled_classes".to_string(),
+            name: "blockifier_ddb_starknet_compiled_classes".to_string(),
             hash_key: "class_hash".to_string(),
             sort_key: None,
         }

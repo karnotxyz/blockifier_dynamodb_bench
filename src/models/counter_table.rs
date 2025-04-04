@@ -8,7 +8,7 @@ pub struct CounterTable;
 impl DynamoTable for CounterTable {
     fn schema() -> TableSchema {
         TableSchema {
-            name: "counter".to_string(),
+            name: "blockifier_ddb_counter".to_string(),
             hash_key: "counter_id".to_string(),
             sort_key: None,
         }

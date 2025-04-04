@@ -15,7 +15,7 @@ pub struct StorageTable;
 impl DynamoTable for StorageTable {
     fn schema() -> TableSchema {
         TableSchema {
-            name: "starknet_storage".to_string(),
+            name: "blockifier_ddb_starknet_storage".to_string(),
             hash_key: "contract_address".to_string(),
             sort_key: Some("storage_key".to_string()),
         }
