@@ -15,7 +15,7 @@ mod transfer_generator;
 
 use models::{
     ClassHashTable, ClassTable, CompiledClassTable, CounterTable, DynamoTable, NonceTable,
-    StorageTable,
+    StorageTable, TxLogTable,
 };
 
 fn format_duration(duration: Duration) -> String {
@@ -59,6 +59,15 @@ enum Commands {
         n_accounts: u16,
         #[arg(long, default_value_t = 10)]
         n_txs: u16,
+        #[arg(long, default_value_t = 1000)]
+        chunk_size: u16,
+        #[arg(long, default_value_t = false)]
+        cleanup_and_migrate: bool,
+    },
+    /// Track transactions per second
+    TrackTps {
+        #[arg(long, default_value_t = 1)]
+        time_window: u64,
     },
 }
 
@@ -69,6 +78,7 @@ async fn cleanup(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
     ClassTable::delete(client.clone()).await?;
     CompiledClassTable::delete(client.clone()).await?;
     CounterTable::delete(client.clone()).await?;
+    TxLogTable::delete(client.clone()).await?;
     Ok(())
 }
 
@@ -79,29 +89,13 @@ async fn migrate(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
     ClassTable::deploy(client.clone()).await?;
     CompiledClassTable::deploy(client.clone()).await?;
     CounterTable::deploy(client.clone()).await?;
+    TxLogTable::deploy(client.clone()).await?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    // env_logger::builder()
-    //     .format(|buf, record| {
-    //         use std::io::Write;
-    //         writeln!(
-    //             buf,
-    //             "[{} {}] {}",
-    //             buf.timestamp_millis(),
-    //             record.level(),
-    //             record.args()
-    //         )
-    //     })
-    //     .filter_level(
-    //         std::env::var("RUST_LOG")
-    //             .map(|level| level.parse().unwrap_or(log::LevelFilter::Info))
-    //             .unwrap_or(log::LevelFilter::Info),
-    //     )
-    //     .init();
     env_logger::builder()
         .filter_level(
             std::env::var("RUST_LOG")
@@ -124,19 +118,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Cleanup => {
             cleanup(client).await?;
         }
-        Commands::Bench { n_accounts, n_txs } => {
+        Commands::TrackTps { time_window } => {
+            info!("Starting TPS tracking with {}s window...", time_window);
+            loop {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let window_start = now - (time_window as u128 * 1_000_000_000);
+
+                let txs =
+                    TxLogTable::query_tx_logs_by_time_range(client.clone(), window_start, now)
+                        .await?;
+
+                let tps = txs.len() as f64 / time_window as f64;
+                info!(
+                    "Current TPS: {:.2} (transactions in last {}s: {})",
+                    tps,
+                    time_window,
+                    txs.len()
+                );
+
+                // Sleep for 1 second before next measurement
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        }
+        Commands::Bench {
+            n_accounts,
+            n_txs,
+            chunk_size,
+            cleanup_and_migrate,
+        } => {
             info!("Running benchmark with {} accounts...", n_accounts);
             // First cleanup and then migrate to ensure a fresh state
-            cleanup(client.clone()).await?;
-            info!("Tables deleted successfully!");
-            info!("Waiting 10s for DynamoDB APIs to refresh...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-            info!("Done waiting!");
-            migrate(client.clone()).await?;
-            info!("Tables created successfully!");
-            info!("Waiting 10s for DynamoDB APIs to refresh...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-            info!("Done waiting!");
+            if cleanup_and_migrate {
+                cleanup(client.clone()).await?;
+                info!("Tables deleted successfully!");
+                info!("Waiting 10s for DynamoDB APIs to refresh...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                info!("Done waiting!");
+                migrate(client.clone()).await?;
+                info!("Tables created successfully!");
+                info!("Waiting 10s for DynamoDB APIs to refresh...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                info!("Done waiting!");
+            }
 
             // Get a unique counter value for this bench run
             // This ensures multiple instances of the bench can run in parallel
@@ -144,51 +170,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // across accounts generated
             let counter = CounterTable::get_and_increment(client.clone()).await?;
             info!("Starting bench run #{}", counter);
+            let metrics = Arc::new(StateMetrics::new());
 
-            let metrics = Arc::new(StateMetrics::default());
-            let number_of_generators = 1;
-            let seed_range = number_of_generators * n_accounts; // every generator has n_accounts inside it
-            let seed_start = counter * seed_range;
-            let mut init_handles = vec![];
-            let mut generators = vec![];
-
-            // First create all generators
-            for i in 0..number_of_generators {
-                let transfers_generator_config = TransfersGeneratorConfig {
-                    recipient_generator_type: RecipientGeneratorType::DisjointFromSenders,
-                    n_accounts,
-                    n_txs: n_txs as usize,
-                    dynamo_db_client: client.clone(),
-                    account_seed: i, // Use different seed for each generator
-                    metrics: metrics.clone(),
-                    ..Default::default()
-                };
-
-                let handle = tokio::spawn(async move {
-                    TransfersGenerator::new(transfers_generator_config).await
-                });
-                init_handles.push(handle);
-            }
-
-            info!("Waiting for all generators to initialize...");
-            for handle in init_handles {
-                generators.push(handle.await.unwrap());
-            }
-
-            let mut transfer_handles = vec![];
-            // Now execute transfers
-            for (i, mut generator) in generators.into_iter().enumerate() {
-                let handle = tokio::spawn(async move {
-                    info!("Starting transfers for generator {}...", i);
-                    generator.execute_transfers().await;
-                });
-                transfer_handles.push(handle);
-            }
-
-            info!("Waiting for all transfers to complete...");
-            for handle in transfer_handles {
-                handle.await.unwrap();
-            }
+            let transfers_generator_config = TransfersGeneratorConfig {
+                recipient_generator_type: RecipientGeneratorType::DisjointFromSenders,
+                n_accounts,
+                dynamo_db_client: client.clone(),
+                metrics: metrics.clone(),
+                n_txs: n_txs as usize,
+                chunk_size: chunk_size as usize,
+                account_seed: counter,
+                ..Default::default()
+            };
+            let mut transfers_generator = TransfersGenerator::new(transfers_generator_config).await;
+            info!("Starting transfers...");
+            transfers_generator.execute_transfers().await;
 
             // Log metrics
             info!("\n=== Performance Metrics ===");

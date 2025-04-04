@@ -1,11 +1,12 @@
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use log::{debug, info};
+use starknet_api::transaction::TransactionHash;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::{client, Client as DynamoDbClient};
@@ -25,6 +26,7 @@ use tokio::runtime::Runtime;
 use crate::metrics::StateMetrics;
 use crate::models::{
     ClassHashTable, CompiledClassTable, DynamoTable, NonceTable, StorageTable, ToDDBString,
+    TxLogTable, ALL_TXS_PARTITION_KEY,
 };
 use crate::read_tracker::{ReadTracker, ReadValue};
 /// A DynamoDB-based implementation of `StateReader`.
@@ -121,7 +123,12 @@ fn create_put_request(
 
     // Add all key attributes
     for (name, value) in key_names.iter().zip(key_values.iter()) {
-        builder = builder.item(*name, AttributeValue::S(value.clone()));
+        // hacky code for now to use N for timestamp
+        if name == &"timestamp" {
+            builder = builder.item(*name, AttributeValue::N(value.clone()));
+        } else {
+            builder = builder.item(*name, AttributeValue::S(value.clone()));
+        }
     }
 
     // Add the value field
@@ -296,6 +303,7 @@ pub async fn update_state_diff(
     state_diff: CommitmentStateDiff,
     metrics: Arc<StateMetrics>,
     read_tracker: Arc<ReadTracker>,
+    tx_hashes: Vec<TransactionHash>,
     allow_chunking: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
@@ -303,6 +311,35 @@ pub async fn update_state_diff(
 
     // Collect all write requests for the transaction
     let mut all_requests = Vec::new();
+
+    // Add transaction log entries
+    debug!("Processing transaction logs...");
+    let current_time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_nanos();
+
+    for (i, tx_hash) in tx_hashes.iter().enumerate() {
+        // Add a small increment to ensure unique timestamps
+        // Better approach might be an atomic counter, can be done later
+        let timestamp = current_time + i as u128;
+        let key_values = vec![ALL_TXS_PARTITION_KEY.to_string(), timestamp.to_string()];
+        debug!(
+            "Transaction log entry - Hash: {}, Timestamp: {}",
+            tx_hash, timestamp
+        );
+
+        let mut extra_attrs = HashMap::new();
+        extra_attrs.insert("tx_hash", AttributeValue::S(tx_hash.0.to_ddb_string()));
+
+        all_requests.push(create_put_request(
+            TxLogTable::schema().name,
+            &["partition_key", "timestamp"],
+            &key_values,
+            "txn_hash",
+            tx_hash.0, // success
+            Option::<&ReadValue<Felt>>::None,
+        )?);
+    }
 
     // Handle storage updates
     debug!("Processing storage updates...");

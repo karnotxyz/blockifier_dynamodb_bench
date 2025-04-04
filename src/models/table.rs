@@ -40,10 +40,15 @@ pub trait DynamoTable {
                     .key_type(KeyType::Range)
                     .build()?,
             );
+            let attribute_type = if sort_key == "timestamp" {
+                ScalarAttributeType::N
+            } else {
+                ScalarAttributeType::S
+            };
             attribute_definitions.push(
                 AttributeDefinition::builder()
                     .attribute_name(sort_key)
-                    .attribute_type(ScalarAttributeType::S)
+                    .attribute_type(attribute_type)
                     .build()?,
             );
         }

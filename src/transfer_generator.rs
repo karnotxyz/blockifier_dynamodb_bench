@@ -23,7 +23,7 @@ use starknet_api::test_utils::invoke::executable_invoke_tx;
 use starknet_api::test_utils::NonceManager;
 use starknet_api::transaction::constants::TRANSFER_ENTRY_POINT_NAME;
 use starknet_api::transaction::fields::Fee;
-use starknet_api::transaction::TransactionVersion;
+use starknet_api::transaction::{TransactionHash, TransactionVersion};
 use starknet_api::{calldata, felt, invoke_tx_args};
 use starknet_types_core::felt::Felt;
 
@@ -65,11 +65,13 @@ pub struct TransfersGeneratorConfig {
     pub metrics: Arc<StateMetrics>,
     pub read_tracker: Arc<ReadTracker>,
     pub account_seed: u16,
+    pub chunk_size: usize,
 }
 
 impl Default for TransfersGeneratorConfig {
     fn default() -> Self {
-        let concurrency_enabled = true;
+        // disabling concurrency, we will spawn multiple pods for concurrency
+        let concurrency_enabled = false;
 
         // Create AWS config in a separate thread to avoid runtime issues
         let client = thread::spawn(|| {
@@ -100,6 +102,7 @@ impl Default for TransfersGeneratorConfig {
             metrics: Arc::new(StateMetrics::new()),
             read_tracker: Arc::new(ReadTracker::new()),
             account_seed: 0,
+            chunk_size: 1000,
         }
     }
 }
@@ -125,6 +128,7 @@ pub struct TransfersGenerator {
     pub read_tracker: Arc<ReadTracker>,
     account_seed: u16,
     class_hash_to_class: HashMap<ClassHash, RunnableCompiledClass>,
+    chunk_size: usize,
 }
 
 impl TransfersGenerator {
@@ -194,6 +198,7 @@ impl TransfersGenerator {
             read_tracker: config.read_tracker.clone(),
             account_seed: config.account_seed,
             class_hash_to_class,
+            chunk_size: config.chunk_size,
         }
     }
 
@@ -232,6 +237,7 @@ impl TransfersGenerator {
 
     pub async fn execute_transfers(&mut self) {
         let mut txs: Vec<Transaction> = Vec::with_capacity(self.config.n_txs);
+        let mut tx_hashes = Vec::with_capacity(self.config.n_txs);
         let start_time = std::time::Instant::now();
         for _ in 0..self.config.n_txs {
             let sender_address = self.account_addresses[self.sender_index];
@@ -240,11 +246,15 @@ impl TransfersGenerator {
 
             let tx = self.generate_transfer(sender_address, recipient_address);
             let account_tx = AccountTransaction::new_for_sequencing(tx);
+            tx_hashes.push(account_tx.tx_hash());
             txs.push(Transaction::Account(account_tx));
         }
 
         // Process transactions in chunks of 20
-        for chunk in txs.chunks(1) {
+        for (chunk, hash_chunk) in txs
+            .chunks(self.config.chunk_size)
+            .zip(tx_hashes.chunks(self.config.chunk_size))
+        {
             let results = self.executor.execute_txs(chunk);
             for result in results {
                 assert!(!result.unwrap().0.is_reverted());
@@ -255,6 +265,7 @@ impl TransfersGenerator {
                 state_diff.clone(),
                 self.metrics.clone(),
                 self.read_tracker.clone(),
+                hash_chunk.to_vec(),
                 false,
             )
             .await
@@ -312,6 +323,7 @@ impl TransfersGenerator {
             calldata: execute_calldata,
             version: self.config.tx_version,
             nonce,
+            tx_hash: TransactionHash(Felt::from(rand::random::<u128>())),
         })
     }
 }
@@ -442,6 +454,7 @@ pub async fn test_state_inner(
         state_diff,
         metrics,
         read_tracker.clone(),
+        vec![],
         true,
     )
     .await
