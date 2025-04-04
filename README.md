@@ -80,7 +80,7 @@ You can run multiple transfer generators in parallel to achieve higher TPS:
 
 Watch a demo of parallel execution:
 
-[![Parallel Execution Demo](docs/bench_video.mp4)](docs/bench_video.mp4)
+[![Parallel Execution Demo](https://www.youtube.com/watch?v=Pd8Kvqm4Y_s)](https://www.youtube.com/watch?v=Pd8Kvqm4Y_s)
 
 ### Monitoring 📊
 
