@@ -14,7 +14,7 @@ mod read_tracker;
 mod transfer_generator;
 
 use models::{
-    ClassHashTable, ClassTable, CompiledClassTable, CounterTable, DynamoTable, NonceTable,
+    ClassHashTable, CompiledClassTable, CounterTable, DynamoTable, NonceTable,
     StorageTable, TxLogTable,
 };
 
@@ -75,7 +75,6 @@ async fn cleanup(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
     StorageTable::delete(client.clone()).await?;
     NonceTable::delete(client.clone()).await?;
     ClassHashTable::delete(client.clone()).await?;
-    ClassTable::delete(client.clone()).await?;
     CompiledClassTable::delete(client.clone()).await?;
     CounterTable::delete(client.clone()).await?;
     TxLogTable::delete(client.clone()).await?;
@@ -86,7 +85,6 @@ async fn migrate(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
     StorageTable::deploy(client.clone()).await?;
     NonceTable::deploy(client.clone()).await?;
     ClassHashTable::deploy(client.clone()).await?;
-    ClassTable::deploy(client.clone()).await?;
     CompiledClassTable::deploy(client.clone()).await?;
     CounterTable::deploy(client.clone()).await?;
     TxLogTable::deploy(client.clone()).await?;

@@ -1,4 +1,3 @@
-mod class;
 mod class_hash;
 mod compiled_class;
 mod counter_table;
@@ -7,7 +6,6 @@ mod storage;
 mod table;
 mod tx_log;
 
-pub use class::*;
 pub use class_hash::*;
 pub use compiled_class::*;
 pub use counter_table::*;
