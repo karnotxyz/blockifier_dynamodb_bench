@@ -95,6 +95,7 @@ async fn migrate(client: Arc<DynamoDbClient>) -> Result<(), Box<dyn std::error::
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv::dotenv().ok();
     let cli = Cli::parse();
     env_logger::builder()
         .filter_level(
@@ -106,7 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting benchmark...");
 
     let config = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new("ap-south-1"))
+        .region(Region::new(
+            std::env::var("AWS_DEFAULT_REGION").unwrap_or("ap-south-1".to_string()),
+        ))
         .load()
         .await;
     let client = Arc::new(DynamoDbClient::new(&config));

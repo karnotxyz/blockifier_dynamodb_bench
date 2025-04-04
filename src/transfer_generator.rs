@@ -78,7 +78,9 @@ impl Default for TransfersGeneratorConfig {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
                 let config = aws_config::defaults(BehaviorVersion::latest())
-                    .region(Region::new("ap-south-1"))
+                    .region(Region::new(
+                        std::env::var("AWS_DEFAULT_REGION").unwrap_or("ap-south-1".to_string()),
+                    ))
                     .load()
                     .await;
                 Arc::new(DynamoDbClient::new(&config))
