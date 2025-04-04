@@ -29,6 +29,7 @@ WORKDIR /app
 COPY --from=builder /app/target/release/blockifier_dynamodb_bench /app/blockifier_dynamodb_bench
 
 # Copy resources folder from cargo dependencies
+# Hacky but does the job for now :)
 COPY --from=builder /usr/local/cargo/git/checkouts/sequencer-77397f56b8742484/e8dd07f/crates/blockifier_test_utils/resources /usr/local/cargo/git/checkouts/sequencer-77397f56b8742484/e8dd07f/crates/blockifier_test_utils/resources
 
 # Set the startup command
