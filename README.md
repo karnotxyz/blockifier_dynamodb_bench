@@ -6,7 +6,7 @@ An exploratory proof of concept for integrating Starknet's Blockifier with Amazo
 
 ## Overview 🌟
 
-This project originated from work at [Finternet](https://finternetlab.io/) where we were exploring the scalability limits of [UNITS Engine](https://github.com/karnotxyz/units_engine) instances. The goal was to test if a UNITS instance could handle parallel transaction loads, particularly for scenarios like cross-jurisdictional transfers. Additionally, we wanted to explore how to handle compliance requirements (like GDPR's data localization) within a single UNITS chain using a scalable database solution (Cloud Spanner's [multi region configuration](https://cloud.google.com/spanner/docs/instance-configurations#regional-configurations) for example).
+This project originated from work at [Finternet](https://finternetlab.io/) where we were exploring the scalability limits of [UNITS Engine](https://github.com/karnotxyz/units_engine) instances. The goal was to test if a UNITS instance could scale horizontally and not be bound to one vetically scalable instance. This is particularly helpful in scenarios where a UNITS deployment spans multiple jurisdictions with transactions that are naturally partitioned - since users in one jurisdiction rarely interact with state from another jurisdiction, their transactions can be processed in parallel. Additionally, we wanted to explore how to handle compliance requirements (like GDPR's data localization) within a single UNITS chain using a scalable database solution (Cloud Spanner's [multi region configuration](https://cloud.google.com/spanner/docs/instance-configurations#regional-configurations) for example).
 
 ## What it Does 🔧
 
@@ -101,3 +101,5 @@ cargo run -- cleanup
 The project uses optimistic concurrency control to enable parallel execution. During transaction execution, all state reads are tracked. When committing state diffs to DynamoDB, the transaction includes conditions ensuring the read values haven't changed. If any value has changed, the DynamoDB transaction fails, preventing state conflicts.
 
 This approach allows multiple transfer generators to run in parallel while maintaining state consistency, effectively enabling horizontal scaling of the sequencer through multiple instances.
+
+Currently, we use the existing hashing techniques that already exist in Starknet. Research can be done on optimizing DynamoDB partition key hashing strategies to ensure efficient sharding across nodes. This can help avoid hot partitions and achieve better throughput distribution when scaling horizontally.
